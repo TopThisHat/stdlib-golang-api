@@ -10,24 +10,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// UserCache defines the caching interface for users
-// Defined in usecase layer to avoid dependency on infrastructure
-type UserCache interface {
-	Get(ctx context.Context, userID string) (*domain.User, error)
-	Set(ctx context.Context, user *domain.User) error
-	Invalidate(ctx context.Context, userID string) error
-}
-
 // UserService orchestrates user-related business operations
 // This layer contains business logic and coordinates between domain and repository
 type UserService struct {
 	userRepo  domain.UserRepository
-	userCache UserCache
+	userCache domain.UserCache
 	logg      *logger.Logger
 }
 
 // NewUserService creates a new user service
-func NewUserService(userRepo domain.UserRepository, userCache UserCache, logg *logger.Logger) *UserService {
+func NewUserService(userRepo domain.UserRepository, userCache domain.UserCache, logg *logger.Logger) *UserService {
 	return &UserService{
 		userRepo:  userRepo,
 		userCache: userCache,

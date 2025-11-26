@@ -1,4 +1,4 @@
-package aws
+package blob
 
 import (
 	"context"
@@ -20,10 +20,16 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// S3Client provides operations for interacting with AWS S3.
-// It wraps the AWS SDK v2 S3 client with domain-specific error handling
-// and logging capabilities.
-type S3Client struct {
+// Ensure S3Store implements the interfaces at compile time
+var (
+	_ Store                 = (*S3Store)(nil)
+	_ PresignedURLGenerator = (*S3Store)(nil)
+	_ FullStore             = (*S3Store)(nil)
+)
+
+// S3Store provides operations for interacting with AWS S3.
+// It implements the Store and PresignedURLGenerator interfaces.
+type S3Store struct {
 	client     *s3.Client
 	uploader   *manager.Uploader
 	downloader *manager.Downloader
@@ -31,10 +37,10 @@ type S3Client struct {
 	logger     *logger.Logger
 }
 
-// S3ClientOption defines functional options for configuring S3Client
-type S3ClientOption func(*s3ClientOptions)
+// S3Option defines functional options for configuring S3Store
+type S3Option func(*s3Options)
 
-type s3ClientOptions struct {
+type s3Options struct {
 	// Upload configuration
 	uploadPartSize      int64
 	uploadConcurrency   int
@@ -49,9 +55,9 @@ type s3ClientOptions struct {
 	usePathStyle   bool
 }
 
-// defaultS3ClientOptions returns sensible defaults for S3 operations
-func defaultS3ClientOptions() *s3ClientOptions {
-	return &s3ClientOptions{
+// defaultS3Options returns sensible defaults for S3 operations
+func defaultS3Options() *s3Options {
+	return &s3Options{
 		uploadPartSize:      10 * 1024 * 1024, // 10 MB
 		uploadConcurrency:   5,
 		uploadLeavePartsErr: false,
@@ -62,8 +68,8 @@ func defaultS3ClientOptions() *s3ClientOptions {
 }
 
 // WithUploadPartSize sets the part size for multipart uploads (minimum 5MB)
-func WithUploadPartSize(size int64) S3ClientOption {
-	return func(o *s3ClientOptions) {
+func WithUploadPartSize(size int64) S3Option {
+	return func(o *s3Options) {
 		if size >= 5*1024*1024 { // AWS minimum is 5MB
 			o.uploadPartSize = size
 		}
@@ -71,8 +77,8 @@ func WithUploadPartSize(size int64) S3ClientOption {
 }
 
 // WithUploadConcurrency sets the number of concurrent upload goroutines
-func WithUploadConcurrency(n int) S3ClientOption {
-	return func(o *s3ClientOptions) {
+func WithUploadConcurrency(n int) S3Option {
+	return func(o *s3Options) {
 		if n > 0 {
 			o.uploadConcurrency = n
 		}
@@ -80,8 +86,8 @@ func WithUploadConcurrency(n int) S3ClientOption {
 }
 
 // WithDownloadPartSize sets the part size for multipart downloads
-func WithDownloadPartSize(size int64) S3ClientOption {
-	return func(o *s3ClientOptions) {
+func WithDownloadPartSize(size int64) S3Option {
+	return func(o *s3Options) {
 		if size > 0 {
 			o.downloadPartSize = size
 		}
@@ -89,8 +95,8 @@ func WithDownloadPartSize(size int64) S3ClientOption {
 }
 
 // WithDownloadConcurrency sets the number of concurrent download goroutines
-func WithDownloadConcurrency(n int) S3ClientOption {
-	return func(o *s3ClientOptions) {
+func WithDownloadConcurrency(n int) S3Option {
+	return func(o *s3Options) {
 		if n > 0 {
 			o.downloadConcurrency = n
 		}
@@ -98,30 +104,30 @@ func WithDownloadConcurrency(n int) S3ClientOption {
 }
 
 // WithCustomEndpoint sets a custom S3 endpoint (for LocalStack, MinIO, etc.)
-func WithCustomEndpoint(endpoint string) S3ClientOption {
-	return func(o *s3ClientOptions) {
+func WithCustomEndpoint(endpoint string) S3Option {
+	return func(o *s3Options) {
 		o.customEndpoint = endpoint
 	}
 }
 
 // WithPathStyle enables path-style addressing (required for some S3-compatible services)
-func WithPathStyle(enabled bool) S3ClientOption {
-	return func(o *s3ClientOptions) {
+func WithPathStyle(enabled bool) S3Option {
+	return func(o *s3Options) {
 		o.usePathStyle = enabled
 	}
 }
 
-// NewS3Client creates a new S3 client with the provided configuration.
+// NewS3Store creates a new S3 blob store with the provided configuration.
 // It uses AWS SDK v2 with automatic credential resolution chain:
 // 1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
 // 2. Shared credentials file (~/.aws/credentials)
 // 3. IAM role (for EC2/ECS/Lambda)
-func NewS3Client(ctx context.Context, cfg *config.Config, log *logger.Logger, opts ...S3ClientOption) (*S3Client, error) {
+func NewS3Store(ctx context.Context, cfg *config.Config, log *logger.Logger, opts ...S3Option) (*S3Store, error) {
 	if cfg.S3Bucket == "" {
 		return nil, fmt.Errorf("S3 bucket name is required")
 	}
 
-	options := defaultS3ClientOptions()
+	options := defaultS3Options()
 	for _, opt := range opts {
 		opt(options)
 	}
@@ -172,12 +178,12 @@ func NewS3Client(ctx context.Context, cfg *config.Config, log *logger.Logger, op
 		d.Concurrency = options.downloadConcurrency
 	})
 
-	log.Info("S3 client initialized",
+	log.Info("S3 blob store initialized",
 		"bucket", cfg.S3Bucket,
 		"region", cfg.AWSRegion,
 	)
 
-	return &S3Client{
+	return &S3Store{
 		client:     client,
 		uploader:   uploader,
 		downloader: downloader,
@@ -186,24 +192,9 @@ func NewS3Client(ctx context.Context, cfg *config.Config, log *logger.Logger, op
 	}, nil
 }
 
-// UploadInput contains parameters for uploading an object to S3
-type UploadInput struct {
-	Key         string            // Object key (required)
-	Body        io.Reader         // Content to upload (required)
-	ContentType string            // MIME type (optional, defaults to application/octet-stream)
-	Metadata    map[string]string // Custom metadata (optional)
-}
-
-// UploadOutput contains the result of an upload operation
-type UploadOutput struct {
-	Location  string // URL of the uploaded object
-	VersionID string // Version ID (if versioning is enabled)
-	ETag      string // Entity tag for the object
-}
-
 // Upload uploads an object to S3 using multipart upload for large files.
 // It automatically handles retries and chunking based on the configured part size.
-func (c *S3Client) Upload(ctx context.Context, input *UploadInput) (*UploadOutput, error) {
+func (s *S3Store) Upload(ctx context.Context, input *UploadInput) (*UploadOutput, error) {
 	if input.Key == "" {
 		return nil, domain.ErrInvalidBlobKey
 	}
@@ -218,7 +209,7 @@ func (c *S3Client) Upload(ctx context.Context, input *UploadInput) (*UploadOutpu
 	}
 
 	uploadInput := &s3.PutObjectInput{
-		Bucket:      aws.String(c.bucket),
+		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(input.Key),
 		Body:        input.Body,
 		ContentType: aws.String(contentType),
@@ -228,17 +219,17 @@ func (c *S3Client) Upload(ctx context.Context, input *UploadInput) (*UploadOutpu
 		uploadInput.Metadata = input.Metadata
 	}
 
-	result, err := c.uploader.Upload(ctx, uploadInput)
+	result, err := s.uploader.Upload(ctx, uploadInput)
 	if err != nil {
-		c.logger.Error("failed to upload object",
+		s.logger.Error("failed to upload object",
 			"key", input.Key,
-			"bucket", c.bucket,
+			"bucket", s.bucket,
 			"error", err,
 		)
 		return nil, fmt.Errorf("%w: %v", domain.ErrBlobUploadFailed, err)
 	}
 
-	c.logger.Debug("object uploaded successfully",
+	s.logger.Debug("object uploaded successfully",
 		"key", input.Key,
 		"location", result.Location,
 	)
@@ -256,30 +247,30 @@ func (c *S3Client) Upload(ctx context.Context, input *UploadInput) (*UploadOutpu
 
 // Download downloads an object from S3 into the provided writer.
 // It uses concurrent range requests for large files.
-func (c *S3Client) Download(ctx context.Context, key string, w io.WriterAt) (int64, error) {
+func (s *S3Store) Download(ctx context.Context, key string, w io.WriterAt) (int64, error) {
 	if key == "" {
 		return 0, domain.ErrInvalidBlobKey
 	}
 
 	input := &s3.GetObjectInput{
-		Bucket: aws.String(c.bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	}
 
-	n, err := c.downloader.Download(ctx, w, input)
+	n, err := s.downloader.Download(ctx, w, input)
 	if err != nil {
-		if c.isNotFoundError(err) {
+		if s.isNotFoundError(err) {
 			return 0, domain.ErrBlobNotFound
 		}
-		c.logger.Error("failed to download object",
+		s.logger.Error("failed to download object",
 			"key", key,
-			"bucket", c.bucket,
+			"bucket", s.bucket,
 			"error", err,
 		)
 		return 0, fmt.Errorf("%w: %v", domain.ErrBlobDownloadFailed, err)
 	}
 
-	c.logger.Debug("object downloaded successfully",
+	s.logger.Debug("object downloaded successfully",
 		"key", key,
 		"bytes", n,
 	)
@@ -289,24 +280,24 @@ func (c *S3Client) Download(ctx context.Context, key string, w io.WriterAt) (int
 
 // GetObject retrieves an object from S3 and returns it as a ReadCloser.
 // The caller is responsible for closing the returned reader.
-func (c *S3Client) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+func (s *S3Store) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	if key == "" {
 		return nil, domain.ErrInvalidBlobKey
 	}
 
 	input := &s3.GetObjectInput{
-		Bucket: aws.String(c.bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	}
 
-	result, err := c.client.GetObject(ctx, input)
+	result, err := s.client.GetObject(ctx, input)
 	if err != nil {
-		if c.isNotFoundError(err) {
+		if s.isNotFoundError(err) {
 			return nil, domain.ErrBlobNotFound
 		}
-		c.logger.Error("failed to get object",
+		s.logger.Error("failed to get object",
 			"key", key,
-			"bucket", c.bucket,
+			"bucket", s.bucket,
 			"error", err,
 		)
 		return nil, fmt.Errorf("%w: %v", domain.ErrBlobDownloadFailed, err)
@@ -315,35 +306,25 @@ func (c *S3Client) GetObject(ctx context.Context, key string) (io.ReadCloser, er
 	return result.Body, nil
 }
 
-// ObjectInfo contains metadata about an S3 object
-type ObjectInfo struct {
-	Key          string
-	Size         int64
-	ContentType  string
-	ETag         string
-	LastModified time.Time
-	Metadata     map[string]string
-}
-
 // HeadObject retrieves metadata about an object without downloading it.
-func (c *S3Client) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
+func (s *S3Store) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
 	if key == "" {
 		return nil, domain.ErrInvalidBlobKey
 	}
 
 	input := &s3.HeadObjectInput{
-		Bucket: aws.String(c.bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	}
 
-	result, err := c.client.HeadObject(ctx, input)
+	result, err := s.client.HeadObject(ctx, input)
 	if err != nil {
-		if c.isNotFoundError(err) {
+		if s.isNotFoundError(err) {
 			return nil, domain.ErrBlobNotFound
 		}
-		c.logger.Error("failed to head object",
+		s.logger.Error("failed to head object",
 			"key", key,
-			"bucket", c.bucket,
+			"bucket", s.bucket,
 			"error", err,
 		)
 		return nil, fmt.Errorf("failed to get object info: %w", err)
@@ -364,33 +345,33 @@ func (c *S3Client) HeadObject(ctx context.Context, key string) (*ObjectInfo, err
 }
 
 // Delete removes an object from S3.
-func (c *S3Client) Delete(ctx context.Context, key string) error {
+func (s *S3Store) Delete(ctx context.Context, key string) error {
 	if key == "" {
 		return domain.ErrInvalidBlobKey
 	}
 
 	input := &s3.DeleteObjectInput{
-		Bucket: aws.String(c.bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	}
 
-	_, err := c.client.DeleteObject(ctx, input)
+	_, err := s.client.DeleteObject(ctx, input)
 	if err != nil {
-		c.logger.Error("failed to delete object",
+		s.logger.Error("failed to delete object",
 			"key", key,
-			"bucket", c.bucket,
+			"bucket", s.bucket,
 			"error", err,
 		)
 		return fmt.Errorf("%w: %v", domain.ErrBlobDeleteFailed, err)
 	}
 
-	c.logger.Debug("object deleted successfully", "key", key)
+	s.logger.Debug("object deleted successfully", "key", key)
 	return nil
 }
 
 // DeleteMultiple removes multiple objects from S3 in a single request.
 // It returns the keys that failed to delete along with any error.
-func (c *S3Client) DeleteMultiple(ctx context.Context, keys []string) ([]string, error) {
+func (s *S3Store) DeleteMultiple(ctx context.Context, keys []string) ([]string, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
@@ -414,17 +395,17 @@ func (c *S3Client) DeleteMultiple(ctx context.Context, keys []string) ([]string,
 		}
 
 		input := &s3.DeleteObjectsInput{
-			Bucket: aws.String(c.bucket),
+			Bucket: aws.String(s.bucket),
 			Delete: &types.Delete{
 				Objects: objects,
 				Quiet:   aws.Bool(true),
 			},
 		}
 
-		result, err := c.client.DeleteObjects(ctx, input)
+		result, err := s.client.DeleteObjects(ctx, input)
 		if err != nil {
-			c.logger.Error("failed to delete objects batch",
-				"bucket", c.bucket,
+			s.logger.Error("failed to delete objects batch",
+				"bucket", s.bucket,
 				"count", len(batch),
 				"error", err,
 			)
@@ -435,7 +416,7 @@ func (c *S3Client) DeleteMultiple(ctx context.Context, keys []string) ([]string,
 		// Collect failed deletions
 		for _, errObj := range result.Errors {
 			failedKeys = append(failedKeys, aws.ToString(errObj.Key))
-			c.logger.Warn("failed to delete object",
+			s.logger.Warn("failed to delete object",
 				"key", aws.ToString(errObj.Key),
 				"code", aws.ToString(errObj.Code),
 				"message", aws.ToString(errObj.Message),
@@ -447,33 +428,19 @@ func (c *S3Client) DeleteMultiple(ctx context.Context, keys []string) ([]string,
 		return failedKeys, fmt.Errorf("%w: %d objects failed to delete", domain.ErrBlobDeleteFailed, len(failedKeys))
 	}
 
-	c.logger.Debug("objects deleted successfully", "count", len(keys))
+	s.logger.Debug("objects deleted successfully", "count", len(keys))
 	return nil, nil
 }
 
-// ListInput contains parameters for listing objects
-type ListInput struct {
-	Prefix     string // Filter objects by prefix
-	MaxKeys    int32  // Maximum number of keys to return (default 1000)
-	StartAfter string // Start listing after this key (for pagination)
-}
-
-// ListOutput contains the result of a list operation
-type ListOutput struct {
-	Objects     []ObjectInfo
-	IsTruncated bool   // True if there are more results
-	NextMarker  string // Use this as StartAfter for the next request
-}
-
 // List lists objects in the S3 bucket with optional filtering by prefix.
-func (c *S3Client) List(ctx context.Context, input *ListInput) (*ListOutput, error) {
+func (s *S3Store) List(ctx context.Context, input *ListInput) (*ListOutput, error) {
 	maxKeys := input.MaxKeys
 	if maxKeys <= 0 {
 		maxKeys = 1000
 	}
 
 	listInput := &s3.ListObjectsV2Input{
-		Bucket:  aws.String(c.bucket),
+		Bucket:  aws.String(s.bucket),
 		MaxKeys: aws.Int32(maxKeys),
 	}
 
@@ -484,10 +451,10 @@ func (c *S3Client) List(ctx context.Context, input *ListInput) (*ListOutput, err
 		listInput.StartAfter = aws.String(input.StartAfter)
 	}
 
-	result, err := c.client.ListObjectsV2(ctx, listInput)
+	result, err := s.client.ListObjectsV2(ctx, listInput)
 	if err != nil {
-		c.logger.Error("failed to list objects",
-			"bucket", c.bucket,
+		s.logger.Error("failed to list objects",
+			"bucket", s.bucket,
 			"prefix", input.Prefix,
 			"error", err,
 		)
@@ -518,23 +485,68 @@ func (c *S3Client) List(ctx context.Context, input *ListInput) (*ListOutput, err
 	return output, nil
 }
 
+// Exists checks if an object exists in S3.
+func (s *S3Store) Exists(ctx context.Context, key string) (bool, error) {
+	_, err := s.HeadObject(ctx, key)
+	if err != nil {
+		if errors.Is(err, domain.ErrBlobNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// Copy copies an object within the same bucket or from another bucket.
+func (s *S3Store) Copy(ctx context.Context, sourceKey, destKey string) error {
+	if sourceKey == "" || destKey == "" {
+		return domain.ErrInvalidBlobKey
+	}
+
+	input := &s3.CopyObjectInput{
+		Bucket:     aws.String(s.bucket),
+		CopySource: aws.String(fmt.Sprintf("%s/%s", s.bucket, sourceKey)),
+		Key:        aws.String(destKey),
+	}
+
+	_, err := s.client.CopyObject(ctx, input)
+	if err != nil {
+		if s.isNotFoundError(err) {
+			return domain.ErrBlobNotFound
+		}
+		s.logger.Error("failed to copy object",
+			"source", sourceKey,
+			"dest", destKey,
+			"bucket", s.bucket,
+			"error", err,
+		)
+		return fmt.Errorf("failed to copy object: %w", err)
+	}
+
+	s.logger.Debug("object copied successfully",
+		"source", sourceKey,
+		"dest", destKey,
+	)
+	return nil
+}
+
 // GeneratePresignedURL generates a pre-signed URL for downloading an object.
 // The URL is valid for the specified duration.
-func (c *S3Client) GeneratePresignedURL(ctx context.Context, key string, expiration time.Duration) (string, error) {
+func (s *S3Store) GeneratePresignedURL(ctx context.Context, key string, expiration time.Duration) (string, error) {
 	if key == "" {
 		return "", domain.ErrInvalidBlobKey
 	}
 
-	presignClient := s3.NewPresignClient(c.client)
+	presignClient := s3.NewPresignClient(s.client)
 
 	request, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(c.bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	}, s3.WithPresignExpires(expiration))
 	if err != nil {
-		c.logger.Error("failed to generate presigned URL",
+		s.logger.Error("failed to generate presigned URL",
 			"key", key,
-			"bucket", c.bucket,
+			"bucket", s.bucket,
 			"error", err,
 		)
 		return "", fmt.Errorf("failed to generate presigned URL: %w", err)
@@ -545,15 +557,15 @@ func (c *S3Client) GeneratePresignedURL(ctx context.Context, key string, expirat
 
 // GeneratePresignedUploadURL generates a pre-signed URL for uploading an object.
 // The URL is valid for the specified duration.
-func (c *S3Client) GeneratePresignedUploadURL(ctx context.Context, key string, contentType string, expiration time.Duration) (string, error) {
+func (s *S3Store) GeneratePresignedUploadURL(ctx context.Context, key string, contentType string, expiration time.Duration) (string, error) {
 	if key == "" {
 		return "", domain.ErrInvalidBlobKey
 	}
 
-	presignClient := s3.NewPresignClient(c.client)
+	presignClient := s3.NewPresignClient(s.client)
 
 	input := &s3.PutObjectInput{
-		Bucket: aws.String(c.bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	}
 	if contentType != "" {
@@ -562,9 +574,9 @@ func (c *S3Client) GeneratePresignedUploadURL(ctx context.Context, key string, c
 
 	request, err := presignClient.PresignPutObject(ctx, input, s3.WithPresignExpires(expiration))
 	if err != nil {
-		c.logger.Error("failed to generate presigned upload URL",
+		s.logger.Error("failed to generate presigned upload URL",
 			"key", key,
-			"bucket", c.bucket,
+			"bucket", s.bucket,
 			"error", err,
 		)
 		return "", fmt.Errorf("failed to generate presigned upload URL: %w", err)
@@ -573,53 +585,8 @@ func (c *S3Client) GeneratePresignedUploadURL(ctx context.Context, key string, c
 	return request.URL, nil
 }
 
-// CopyObject copies an object within the same bucket or from another bucket.
-func (c *S3Client) CopyObject(ctx context.Context, sourceKey, destKey string) error {
-	if sourceKey == "" || destKey == "" {
-		return domain.ErrInvalidBlobKey
-	}
-
-	input := &s3.CopyObjectInput{
-		Bucket:     aws.String(c.bucket),
-		CopySource: aws.String(fmt.Sprintf("%s/%s", c.bucket, sourceKey)),
-		Key:        aws.String(destKey),
-	}
-
-	_, err := c.client.CopyObject(ctx, input)
-	if err != nil {
-		if c.isNotFoundError(err) {
-			return domain.ErrBlobNotFound
-		}
-		c.logger.Error("failed to copy object",
-			"source", sourceKey,
-			"dest", destKey,
-			"bucket", c.bucket,
-			"error", err,
-		)
-		return fmt.Errorf("failed to copy object: %w", err)
-	}
-
-	c.logger.Debug("object copied successfully",
-		"source", sourceKey,
-		"dest", destKey,
-	)
-	return nil
-}
-
-// Exists checks if an object exists in S3.
-func (c *S3Client) Exists(ctx context.Context, key string) (bool, error) {
-	_, err := c.HeadObject(ctx, key)
-	if err != nil {
-		if errors.Is(err, domain.ErrBlobNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
 // isNotFoundError checks if the error indicates the object was not found
-func (c *S3Client) isNotFoundError(err error) bool {
+func (s *S3Store) isNotFoundError(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.ErrorCode() {
@@ -642,6 +609,6 @@ func (c *S3Client) isNotFoundError(err error) bool {
 }
 
 // Bucket returns the configured bucket name
-func (c *S3Client) Bucket() string {
-	return c.bucket
+func (s *S3Store) Bucket() string {
+	return s.bucket
 }

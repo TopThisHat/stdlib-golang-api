@@ -28,6 +28,14 @@ type UserRepository interface {
 	List(ctx context.Context, limit, offset int) ([]*User, error)
 }
 
+// UserCache defines the contract for user caching
+// The domain defines the interface, infrastructure implements it
+type UserCache interface {
+	Get(ctx context.Context, userID string) (*User, error)
+	Set(ctx context.Context, user *User) error
+	Invalidate(ctx context.Context, userID string) error
+}
+
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 
 // NewUser creates a new user with validation

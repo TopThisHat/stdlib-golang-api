@@ -10,28 +10,17 @@ import (
 	"github.com/google/uuid"
 )
 
-// OrderCache defines the caching interface for orders
-// Defined in usecase layer to avoid dependency on infrastructure
-type OrderCache interface {
-	Get(ctx context.Context, orderID string) (*domain.Order, error)
-	Set(ctx context.Context, order *domain.Order) error
-	Invalidate(ctx context.Context, orderID string) error
-	InvalidateByUserID(ctx context.Context, userID string) error
-	AddUserOrderIndex(ctx context.Context, userID, orderID string) error
-	RemoveUserOrderIndex(ctx context.Context, userID, orderID string) error
-}
-
 // OrderService orchestrates order-related business operations
 // This layer contains business logic and coordinates between domain and repository
 type OrderService struct {
 	orderRepo  domain.OrderRepository
 	userRepo   domain.UserRepository
-	orderCache OrderCache
+	orderCache domain.OrderCache
 	logg       *logger.Logger
 }
 
 // NewOrderService creates a new order service
-func NewOrderService(orderRepo domain.OrderRepository, userRepo domain.UserRepository, orderCache OrderCache, logg *logger.Logger) *OrderService {
+func NewOrderService(orderRepo domain.OrderRepository, userRepo domain.UserRepository, orderCache domain.OrderCache, logg *logger.Logger) *OrderService {
 	return &OrderService{
 		orderRepo:  orderRepo,
 		userRepo:   userRepo,

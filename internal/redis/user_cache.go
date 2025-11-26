@@ -6,16 +6,21 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/TopThisHat/stdlib-golang-api/internal/domain"
+	"github.com/redis/go-redis/v9"
 )
 
+// Ensure UserCache implements domain.UserCache at compile time
+var _ domain.UserCache = (*UserCache)(nil)
+
+// UserCache is a Redis implementation of domain.UserCache
 type UserCache struct {
 	client *redis.Client
 	ttl    time.Duration
 }
 
-func NewUserCache(c *redis.Client) *UserCache {
+// NewUserCache creates a Redis-backed user cache
+func NewUserCache(c *redis.Client) domain.UserCache {
 	return &UserCache{
 		client: c,
 		ttl:    5 * time.Minute,

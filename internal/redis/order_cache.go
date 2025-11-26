@@ -10,12 +10,17 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Ensure OrderCache implements domain.OrderCache at compile time
+var _ domain.OrderCache = (*OrderCache)(nil)
+
+// OrderCache is a Redis implementation of domain.OrderCache
 type OrderCache struct {
 	client *redis.Client
 	ttl    time.Duration // How long to cache entries
 }
 
-func NewOrderCache(c *redis.Client) *OrderCache {
+// NewOrderCache creates a Redis-backed order cache
+func NewOrderCache(c *redis.Client) domain.OrderCache {
 	return &OrderCache{
 		client: c,
 		ttl:    10 * time.Minute, // Cache orders for 10 minutes

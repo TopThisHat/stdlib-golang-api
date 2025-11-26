@@ -47,6 +47,18 @@ type OrderRepository interface {
 	List(ctx context.Context, limit, offset int) ([]*Order, error)
 }
 
+// OrderCache defines the contract for order caching
+// The domain defines the interface, infrastructure implements it
+type OrderCache interface {
+	Get(ctx context.Context, orderID string) (*Order, error)
+	Set(ctx context.Context, order *Order) error
+	Invalidate(ctx context.Context, orderID string) error
+	InvalidateByUserID(ctx context.Context, userID string) error
+	// Index methods for maintaining user-to-orders mapping
+	AddUserOrderIndex(ctx context.Context, userID, orderID string) error
+	RemoveUserOrderIndex(ctx context.Context, userID, orderID string) error
+}
+
 // NewOrder creates a new order with validation
 // Business rule: Order must have valid user, positive amount, and at least one item
 func NewOrder(id, userID string, items []OrderItem) (*Order, error) {
